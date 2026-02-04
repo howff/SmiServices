@@ -27,7 +27,8 @@ public class FileCopierHost : MicroserviceHost
             copyStatusProducerModel,
             Globals.FileSystemOptions.FileSystemRoot!,
             Globals.FileSystemOptions.ExtractRoot!,
-            fileSystem
+            fileSystem,
+            Globals.FileSystemOptions.ExtractionPoolRoot
         );
         _consumer = new FileCopyQueueConsumer(fileCopier);
     }

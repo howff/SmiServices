@@ -6,6 +6,7 @@ using SmiServices.Common.Options;
 using SmiServices.Microservices.DicomAnonymiser.Anonymisers;
 using System;
 using System.IO.Abstractions;
+using System.Security.Cryptography;
 
 namespace SmiServices.Microservices.DicomAnonymiser;
 
@@ -16,6 +17,7 @@ public class DicomAnonymiserConsumer : Consumer<ExtractFileMessage>
     private readonly DicomAnonymiserOptions _options;
     private readonly string _fileSystemRoot;
     private readonly string _extractRoot;
+    private readonly string? _poolRoot;
     private readonly IDicomAnonymiser _anonymiser;
     private readonly IProducerModel _statusMessageProducer;
 
@@ -25,13 +27,15 @@ public class DicomAnonymiserConsumer : Consumer<ExtractFileMessage>
         string extractRoot,
         IDicomAnonymiser anonymiser,
         IProducerModel statusMessageProducer,
-        IFileSystem? fileSystem = null
+        IFileSystem? fileSystem = null,
+        string? poolRoot = null
     )
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _fileSystem = fileSystem ?? new FileSystem();
         _fileSystemRoot = fileSystemRoot ?? throw new ArgumentNullException(nameof(fileSystemRoot));
         _extractRoot = extractRoot ?? throw new ArgumentNullException(nameof(extractRoot));
+        _poolRoot = poolRoot;
         _anonymiser = anonymiser ?? throw new ArgumentNullException(nameof(anonymiser));
         _statusMessageProducer = statusMessageProducer ?? throw new ArgumentNullException(nameof(statusMessageProducer));
 
@@ -40,6 +44,9 @@ public class DicomAnonymiserConsumer : Consumer<ExtractFileMessage>
 
         if (!_fileSystem.Directory.Exists(_extractRoot))
             throw new Exception($"Extract root does not exist: '{extractRoot}'");
+
+        if (_poolRoot != null && !_fileSystem.Directory.Exists(_poolRoot))
+            throw new Exception($"Pool root does not exist: '{poolRoot}'");
     }
 
     protected override void ProcessMessageImpl(IMessageHeader header, ExtractFileMessage message, ulong tag)
@@ -84,9 +91,20 @@ public class DicomAnonymiserConsumer : Consumer<ExtractFileMessage>
 
         destFileAbs.Directory!.Create();
 
-        _logger.Debug($"Anonymising '{sourceFileAbs}' to '{destFileAbs}'");
+        ExtractedFileStatus anonymiserStatus;
+        string? anonymiserStatusMessage;
 
-        var anonymiserStatus = _anonymiser.Anonymise(sourceFileAbs, destFileAbs, message.Modality, out var anonymiserStatusMessage);
+        // Handle pooled extraction
+        if (message.IsPooledExtraction && _poolRoot != null)
+        {
+            anonymiserStatus = ProcessPooledAnonymisation(sourceFileAbs, destFileAbs, message.Modality, out anonymiserStatusMessage);
+        }
+        else
+        {
+            // Normal anonymisation - write directly to destination
+            _logger.Debug($"Anonymising '{sourceFileAbs}' to '{destFileAbs}'");
+            anonymiserStatus = _anonymiser.Anonymise(sourceFileAbs, destFileAbs, message.Modality, out anonymiserStatusMessage);
+        }
 
         var logMessage = $"Anonymisation of '{sourceFileAbs}' returned {anonymiserStatus}";
         if (anonymiserStatus != ExtractedFileStatus.Anonymised)
@@ -111,5 +129,71 @@ public class DicomAnonymiserConsumer : Consumer<ExtractFileMessage>
         _statusMessageProducer.SendMessage(statusMessage, header, routingKey);
 
         Ack(header, tag);
+    }
+
+    private ExtractedFileStatus ProcessPooledAnonymisation(IFileInfo sourceFileAbs, IFileInfo destFileAbs, string modality, out string? statusMessage)
+    {
+        // Create a temporary file for anonymisation
+        var tempFileName = _fileSystem.Path.Combine(_fileSystem.Path.GetTempPath(), _fileSystem.Path.GetRandomFileName());
+        var tempFileInfo = _fileSystem.FileInfo.New(tempFileName);
+
+        try
+        {
+            // Anonymise to temporary file
+            _logger.Debug($"Anonymising '{sourceFileAbs}' to temporary file '{tempFileName}'");
+            var anonymiserStatus = _anonymiser.Anonymise(sourceFileAbs, tempFileInfo, modality, out statusMessage);
+
+            if (anonymiserStatus != ExtractedFileStatus.Anonymised)
+            {
+                // Anonymisation failed, clean up temp file and return
+                if (_fileSystem.File.Exists(tempFileName))
+                    _fileSystem.File.Delete(tempFileName);
+                return anonymiserStatus;
+            }
+
+            // Compute hash of anonymised file
+            string poolFileName = ComputeFileHash(tempFileName);
+            string poolFilePath = _fileSystem.Path.Combine(_poolRoot!, poolFileName);
+
+            // Check if anonymised file already exists in pool
+            if (!_fileSystem.File.Exists(poolFilePath))
+            {
+                _logger.Debug($"Anonymised file not in pool. Moving to pool as '{poolFileName}'");
+                _fileSystem.File.Move(tempFileName, poolFilePath, overwrite: false);
+            }
+            else
+            {
+                _logger.Debug($"Anonymised file already exists in pool as '{poolFileName}'. Deleting temp file.");
+                _fileSystem.File.Delete(tempFileName);
+            }
+
+            // Remove destination if it already exists (can't create symlink to existing file)
+            if (_fileSystem.File.Exists(destFileAbs.FullName))
+            {
+                _logger.Debug($"Removing existing destination file '{destFileAbs.FullName}'");
+                _fileSystem.File.Delete(destFileAbs.FullName);
+            }
+
+            // Create symbolic link from destination to pool file
+            _logger.Debug($"Creating symbolic link from '{destFileAbs.FullName}' to '{poolFilePath}'");
+            _fileSystem.File.CreateSymbolicLink(destFileAbs.FullName, poolFilePath);
+
+            return ExtractedFileStatus.Anonymised;
+        }
+        catch
+        {
+            // Clean up temp file on any error
+            if (_fileSystem.File.Exists(tempFileName))
+                _fileSystem.File.Delete(tempFileName);
+            throw;
+        }
+    }
+
+    private string ComputeFileHash(string filePath)
+    {
+        using var stream = _fileSystem.File.OpenRead(filePath);
+        using var sha256 = SHA256.Create();
+        byte[] hashBytes = sha256.ComputeHash(stream);
+        return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
     }
 }
