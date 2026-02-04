@@ -101,7 +101,8 @@ public class DicomAnonymiserConsumerTests
 
     private DicomAnonymiserConsumer GetNewDicomAnonymiserConsumer(
         IDicomAnonymiser? mockDicomAnonymiser = null,
-        IProducerModel? mockProducerModel = null
+        IProducerModel? mockProducerModel = null,
+        string? poolRoot = null
     )
     {
         var consumer = new DicomAnonymiserConsumer(
@@ -110,7 +111,8 @@ public class DicomAnonymiserConsumerTests
             _extractRootDirInfo.FullName,
             mockDicomAnonymiser ?? new Mock<IDicomAnonymiser>(MockBehavior.Strict).Object,
             mockProducerModel ?? new Mock<IProducerModel>(MockBehavior.Strict).Object,
-            _mockFs
+            _mockFs,
+            poolRoot
         );
         return consumer;
     }
@@ -333,6 +335,162 @@ public class DicomAnonymiserConsumerTests
         TestTimelineAwaiter.Await(() => consumer.AckCount == 1 && consumer.NackCount == 0);
 
         mockProducerModel.Verify(expectedCall, Times.Once);
+    }
+
+    [Test]
+    public void ProcessMessageImpl_PooledExtraction_CreatesSymlinkToPool()
+    {
+        // Arrange
+        const string poolRoot = "pool";
+        _mockFs.Directory.CreateDirectory(poolRoot);
+
+        _extractFileMessage.IsPooledExtraction = true;
+
+        var mockAnonymiser = new Mock<IDicomAnonymiser>(MockBehavior.Strict);
+        string? anonStatusMsg = null;
+        mockAnonymiser
+            .Setup(x => x.Anonymise(
+                It.Is<IFileInfo>(f => f.FullName == _sourceDcmPathAbs),
+                It.IsAny<IFileInfo>(),
+                "CT",
+                out anonStatusMsg
+            ))
+            .Callback((IFileInfo src, IFileInfo dest, string mod, out string? msg) =>
+            {
+                // Simulate anonymisation by creating a file
+                _mockFs.File.WriteAllBytes(dest.FullName, [1, 2, 3, 4]);
+                msg = null;
+            })
+            .Returns(ExtractedFileStatus.Anonymised);
+
+        var mockProducerModel = new Mock<IProducerModel>();
+        mockProducerModel
+            .Setup(x => x.SendMessage(
+                It.Is<ExtractedFileStatusMessage>(m => m.Status == ExtractedFileStatus.Anonymised),
+                It.IsAny<IMessageHeader>(),
+                _options.RoutingKeySuccess
+            ));
+
+        var consumer = new DicomAnonymiserConsumer(
+            _options,
+            _dicomRootDirInfo.FullName,
+            _extractRootDirInfo.FullName,
+            mockAnonymiser.Object,
+            mockProducerModel.Object,
+            _mockFs,
+            poolRoot
+        );
+
+        // Act
+        consumer.ProcessMessage(new MessageHeader(), _extractFileMessage, 1);
+
+        // Assert
+        TestTimelineAwaiter.Await(() => consumer.AckCount == 1 && consumer.NackCount == 0);
+
+        // Verify destination is a symlink
+        string expectedDest = _mockFs.Path.Combine(_extractDir, _extractFileMessage.OutputPath);
+        var linkInfo = _mockFs.FileInfo.New(expectedDest);
+        Assert.Multiple(() =>
+        {
+            Assert.That(linkInfo.Exists, Is.True, "Symlink should exist");
+            Assert.That(linkInfo.LinkTarget, Is.Not.Null, "Should be a symbolic link");
+        });
+
+        // Verify the pool file exists
+        string poolFilePath = linkInfo.LinkTarget!;
+        Assert.That(_mockFs.File.Exists(poolFilePath), Is.True, "Pool file should exist");
+    }
+
+    [Test]
+    public void ProcessMessageImpl_PooledExtraction_ReusesDuplicateFiles()
+    {
+        // Arrange
+        const string poolRoot = "pool";
+        _mockFs.Directory.CreateDirectory(poolRoot);
+
+        _extractFileMessage.IsPooledExtraction = true;
+
+        var mockAnonymiser = new Mock<IDicomAnonymiser>(MockBehavior.Strict);
+        string? anonStatusMsg = null;
+        mockAnonymiser
+            .Setup(x => x.Anonymise(
+                It.IsAny<IFileInfo>(),
+                It.IsAny<IFileInfo>(),
+                It.IsAny<string>(),
+                out anonStatusMsg
+            ))
+            .Callback((IFileInfo src, IFileInfo dest, string mod, out string? msg) =>
+            {
+                // Simulate anonymisation by creating a file with the same content for the same source
+                _mockFs.File.WriteAllBytes(dest.FullName, [1, 2, 3, 4]);
+                msg = null;
+            })
+            .Returns(ExtractedFileStatus.Anonymised);
+
+        var mockProducerModel = new Mock<IProducerModel>();
+        mockProducerModel
+            .Setup(x => x.SendMessage(
+                It.IsAny<IMessage>(),
+                It.IsAny<IMessageHeader>(),
+                It.IsAny<string>()
+            ));
+
+        var consumer = new DicomAnonymiserConsumer(
+            _options,
+            _dicomRootDirInfo.FullName,
+            _extractRootDirInfo.FullName,
+            mockAnonymiser.Object,
+            mockProducerModel.Object,
+            _mockFs,
+            poolRoot
+        );
+
+        // Act - Process first message
+        consumer.ProcessMessage(new MessageHeader(), _extractFileMessage, 1);
+        TestTimelineAwaiter.Await(() => consumer.AckCount == 1);
+
+        // Get pool file count after first processing
+        int poolFileCountBefore = _mockFs.Directory.GetFiles(poolRoot).Length;
+
+        // Process second message with different output path
+        var secondMessage = new ExtractFileMessage
+        {
+            JobSubmittedAt = DateTime.UtcNow,
+            ExtractionJobIdentifier = Guid.NewGuid(),
+            ProjectNumber = "5678",
+            ExtractionDirectory = _extractFileMessage.ExtractionDirectory,
+            DicomFilePath = _extractFileMessage.DicomFilePath,
+            OutputPath = "different-an.dcm",
+            Modality = "CT",
+            IsPooledExtraction = true,
+        };
+
+        consumer.ProcessMessage(new MessageHeader(), secondMessage, 2);
+
+        // Assert
+        TestTimelineAwaiter.Await(() => consumer.AckCount == 2);
+
+        // Get pool file count after second processing
+        int poolFileCountAfter = _mockFs.Directory.GetFiles(poolRoot).Length;
+
+        // Should be the same - no new file created (since both are anonymised versions of the same source)
+        Assert.That(poolFileCountAfter, Is.EqualTo(poolFileCountBefore), 
+            "No new pool file should be created for duplicate anonymised content");
+
+        // Both destinations should exist and point to the same pool file
+        string dest1 = _mockFs.Path.Combine(_extractDir, _extractFileMessage.OutputPath);
+        string dest2 = _mockFs.Path.Combine(_extractDir, secondMessage.OutputPath);
+
+        var link1 = _mockFs.FileInfo.New(dest1);
+        var link2 = _mockFs.FileInfo.New(dest2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(link1.Exists, Is.True);
+            Assert.That(link2.Exists, Is.True);
+            Assert.That(link1.LinkTarget, Is.EqualTo(link2.LinkTarget), 
+                "Both symlinks should point to the same pool file");
+        });
     }
 
     #endregion
