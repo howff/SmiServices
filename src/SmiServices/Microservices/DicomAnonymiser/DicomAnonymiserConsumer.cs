@@ -1,4 +1,5 @@
 using NLog;
+using SmiServices.Common.Helpers;
 using SmiServices.Common.Messages;
 using SmiServices.Common.Messages.Extraction;
 using SmiServices.Common.Messaging;
@@ -6,7 +7,6 @@ using SmiServices.Common.Options;
 using SmiServices.Microservices.DicomAnonymiser.Anonymisers;
 using System;
 using System.IO.Abstractions;
-using System.Security.Cryptography;
 
 namespace SmiServices.Microservices.DicomAnonymiser;
 
@@ -152,7 +152,7 @@ public class DicomAnonymiserConsumer : Consumer<ExtractFileMessage>
             }
 
             // Compute hash of anonymised file
-            string poolFileName = ComputeFileHash(tempFileName);
+            string poolFileName = FileHashHelper.ComputeSha256Hash(_fileSystem, tempFileName);
             string poolFilePath = _fileSystem.Path.Combine(_poolRoot!, poolFileName);
 
             // Check if anonymised file already exists in pool
@@ -187,13 +187,5 @@ public class DicomAnonymiserConsumer : Consumer<ExtractFileMessage>
                 _fileSystem.File.Delete(tempFileName);
             throw;
         }
-    }
-
-    private string ComputeFileHash(string filePath)
-    {
-        using var stream = _fileSystem.File.OpenRead(filePath);
-        using var sha256 = SHA256.Create();
-        byte[] hashBytes = sha256.ComputeHash(stream);
-        return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
     }
 }

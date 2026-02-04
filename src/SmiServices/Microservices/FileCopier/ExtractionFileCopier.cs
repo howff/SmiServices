@@ -1,11 +1,11 @@
 using NLog;
+using SmiServices.Common.Helpers;
 using SmiServices.Common.Messages;
 using SmiServices.Common.Messages.Extraction;
 using SmiServices.Common.Messaging;
 using SmiServices.Common.Options;
 using System;
 using System.IO.Abstractions;
-using System.Security.Cryptography;
 
 
 namespace SmiServices.Microservices.FileCopier;
@@ -108,7 +108,7 @@ public class ExtractionFileCopier : IFileCopier
     private void ProcessPooledExtraction(string fullSrc, string fullDest, ExtractFileMessage message)
     {
         // Compute hash of source file to determine pool filename
-        string poolFileName = ComputeFileHash(fullSrc);
+        string poolFileName = FileHashHelper.ComputeSha256Hash(_fileSystem, fullSrc);
         string poolFilePath = _fileSystem.Path.Combine(_poolRoot!, poolFileName);
 
         // If file doesn't exist in pool, copy it there
@@ -132,13 +132,5 @@ public class ExtractionFileCopier : IFileCopier
         // Create symbolic link from destination to pool file
         _logger.Debug($"Creating symbolic link from '{fullDest}' to '{poolFilePath}'");
         _fileSystem.File.CreateSymbolicLink(fullDest, poolFilePath);
-    }
-
-    private string ComputeFileHash(string filePath)
-    {
-        using var stream = _fileSystem.File.OpenRead(filePath);
-        using var sha256 = SHA256.Create();
-        byte[] hashBytes = sha256.ComputeHash(stream);
-        return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
     }
 }
