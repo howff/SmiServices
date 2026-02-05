@@ -5,8 +5,9 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * *"
+  copilot/modify-image-extraction-pipeline:
+  #schedule:
+  #  - cron: "0 6 * * *"
 
 defaults:
   run:
