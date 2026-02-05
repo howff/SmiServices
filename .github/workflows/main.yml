@@ -116,25 +116,11 @@ jobs:
           ./bin/smi/smi_build_test_package.py \
               ${{ needs.init.outputs.build_ref }} \
               "$cov"
-      - name: upload coverage to codecov
-        if: ${{ matrix.os == 'linux' }}
-        uses: codecov/codecov-action@v5.4.3
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: coverage/
-          fail_ci_if_error: true
       - name: upload dist as artifact
         uses: actions/upload-artifact@v4
         with:
           name: SmiServices-${{ needs.init.outputs.build_ref }}-smi-${{ matrix.os }}.zip
           path: dist/${{ needs.init.outputs.build_ref }}/*
-          if-no-files-found: error
-      - name: upload coverage as artifact
-        if: ${{ matrix.os == 'linux' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: SmiServices-${{ needs.init.outputs.build_ref }}-smi-${{ matrix.os }}-coverage
-          path: coverage/*
           if-no-files-found: error
   ctp:
     needs: [init]
