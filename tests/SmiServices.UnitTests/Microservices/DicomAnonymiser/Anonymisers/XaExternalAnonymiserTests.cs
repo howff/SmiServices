@@ -15,6 +15,10 @@ internal class XaExternalAnonymiserTests
     [Test]
     public void Anonymise_HappyPath_IsOk()
     {
+        // Skip on Windows as bash scripts won't execute
+        if (OperatingSystem.IsWindows())
+            Assert.Ignore("Test requires bash and is not supported on Windows");
+
         // Arrange
 
         // Create a simple test script that copies the input to output
@@ -105,6 +109,10 @@ internal class XaExternalAnonymiserTests
     [Test]
     public void Anonymise_ToolFailsWithExitCode_ReturnsError()
     {
+        // Skip on Windows as bash scripts won't execute
+        if (OperatingSystem.IsWindows())
+            Assert.Ignore("Test requires bash and is not supported on Windows");
+
         // Arrange
 
         using var tempDir = new DisposableTempDir();

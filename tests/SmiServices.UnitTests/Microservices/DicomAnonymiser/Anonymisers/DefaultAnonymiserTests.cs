@@ -15,6 +15,10 @@ internal class DefaultAnonymiserTests
     [Test]
     public void DefaultAnonymiser_WithXaToolConfigured_InitializesSuccessfully()
     {
+        // Skip on Windows as bash scripts won't execute
+        if (OperatingSystem.IsWindows())
+            Assert.Ignore("Test requires bash and is not supported on Windows");
+
         // This test verifies that DefaultAnonymiser can be instantiated
         // when both CTP and XA tool paths are configured correctly.
         // We can't test the actual routing without starting CTP process,
