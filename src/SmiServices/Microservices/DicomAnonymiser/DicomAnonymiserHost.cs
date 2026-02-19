@@ -28,7 +28,8 @@ public class DicomAnonymiserHost : MicroserviceHost
             Globals.FileSystemOptions.ExtractRoot!,
             _anonymiser,
             producerModel,
-            fileSystem
+            fileSystem,
+            Globals.FileSystemOptions.ExtractionPoolRoot
         );
     }
 
