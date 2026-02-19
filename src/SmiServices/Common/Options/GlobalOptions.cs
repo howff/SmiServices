@@ -502,6 +502,7 @@ public class DicomAnonymiserOptions : IOptions
     public string? CtpAnonCliJar { get; set; }
     public string? CtpAllowlistScript { get; set; }
     public string? SRAnonymiserToolPath { get; set; }
+    public string? XaAnonymiserToolPath { get; set; }
 
     public override string ToString() => GlobalOptions.GenerateToString(this);
 }
